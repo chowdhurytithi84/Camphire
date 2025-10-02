@@ -1,0 +1,505 @@
+import re
+import os
+import json
+import logging
+from datetime import datetime
+from typing import Dict, List, Optional
+from dataclasses import dataclass, asdict
+import pandas as pd
+import pdfplumber
+
+try:
+    import pytesseract
+    from pdf2image import convert_from_path
+    OCR_AVAILABLE = True
+except ImportError:
+    OCR_AVAILABLE = False
+
+try:
+    import spacy
+    nlp = spacy.load("en_core_web_sm")
+except (ImportError, OSError):
+    nlp = None
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class CandidateProfile:
+    full_name: str = ""
+    email: str = ""
+    contact_number: str = ""
+    address: str = ""
+    linkedin_url: str = ""
+    github_url: str = ""
+    other_links: List[str] = None
+    skills: List[str] = None
+    recent_company: str = ""
+    total_experience_years: float = 0.0
+    industry: str = ""
+    education: List[Dict] = None
+    work_experience: List[Dict] = None
+    raw_text: str = ""
+    final_score: float = 0.0
+    ai_score: float = 0.0
+    coding_score: float = 0.0
+    experience_score: float = 0.0
+    rank: int = 0
+    tier: str = ""
+    
+    def __post_init__(self):
+        self.other_links = self.other_links or []
+        self.skills = self.skills or []
+        self.education = self.education or []
+        self.work_experience = self.work_experience or []
+
+
+SCORING_CONFIG = {
+    'ai_ml_core': {
+        'weight': 10,
+        'keywords': [
+            'machine learning', 'deep learning', 'neural network', 
+            'artificial intelligence', 'ai', 'ml', 'nlp',
+            'natural language processing', 'computer vision', 'cv',
+            'reinforcement learning', 'llm', 'large language model',
+            'transformer', 'gpt', 'bert', 'generative ai', 'genai',
+            'diffusion model', 'gan', 'vae', 'autoencoder'
+        ]
+    },
+    'ai_frameworks': {
+        'weight': 8,
+        'keywords': [
+            'tensorflow', 'pytorch', 'keras', 'scikit-learn', 'sklearn',
+            'hugging face', 'huggingface', 'langchain', 'llamaindex',
+            'jax', 'mxnet', 'caffe', 'fastai', 'xgboost',
+            'lightgbm', 'catboost', 'opencv', 'yolo', 'detectron'
+        ]
+    },
+    'data_science': {
+        'weight': 6,
+        'keywords': [
+            'pandas', 'numpy', 'data analysis', 'statistics', 
+            'data mining', 'feature engineering', 'etl', 'mlops',
+            'data pipeline', 'matplotlib', 'seaborn', 'plotly',
+            'tableau', 'jupyter', 'databricks', 'spark', 'hadoop'
+        ]
+    },
+    'programming': {
+        'weight': 5,
+        'keywords': [
+            'python', 'r', 'julia', 'c++', 'java', 'scala', 
+            'javascript', 'typescript', 'sql', 'go', 'rust'
+        ]
+    },
+    'cloud_ml': {
+        'weight': 7,
+        'keywords': [
+            'aws', 'sagemaker', 'azure', 'azure ml', 'gcp',
+            'google cloud', 'vertex ai', 'mlflow', 'kubeflow',
+            'airflow', 'docker', 'kubernetes', 'gpu', 'cuda'
+        ]
+    },
+    'general_dev': {
+        'weight': 3,
+        'keywords': [
+            'git', 'github', 'gitlab', 'ci/cd', 'jenkins',
+            'agile', 'rest api', 'graphql', 'microservices',
+            'unit test', 'tdd'
+        ]
+    }
+}
+
+EXPERIENCE_MULTIPLIERS = {
+    (0, 2): 1.0,
+    (2, 5): 1.3,
+    (5, 10): 1.6,
+    (10, float('inf')): 2.0
+}
+
+
+class PDFExtractor:
+    @staticmethod
+    def extract_text(pdf_path: str) -> str:
+        text = ""
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+            
+            if len(text.strip()) < 100 and OCR_AVAILABLE:
+                logger.info(f"Low text content, attempting OCR for {pdf_path}")
+                text = PDFExtractor._ocr_extract(pdf_path)
+        except Exception as e:
+            logger.error(f"Error extracting text from {pdf_path}: {e}")
+            if OCR_AVAILABLE:
+                try:
+                    text = PDFExtractor._ocr_extract(pdf_path)
+                except Exception as ocr_err:
+                    logger.error(f"OCR failed: {ocr_err}")
+        
+        return text
+    
+    @staticmethod
+    def _ocr_extract(pdf_path: str) -> str:
+        images = convert_from_path(pdf_path)
+        return "\n".join(pytesseract.image_to_string(img) for img in images)
+
+
+class InformationExtractor:
+    EMAIL_RE = re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b')
+    PHONE_RE = re.compile(r'[\+]?[(]?[0-9]{1,4}[)]?[-\s\.]?[(]?[0-9]{1,4}[)]?[-\s\.]?[0-9]{1,5}[-\s\.]?[0-9]{1,5}')
+    LINKEDIN_RE = re.compile(r'(?:linkedin\.com/in/|linkedin\.com/pub/)([a-zA-Z0-9-]+)')
+    GITHUB_RE = re.compile(r'(?:github\.com/)([a-zA-Z0-9-]+)')
+    URL_RE = re.compile(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+')
+    
+    def __init__(self):
+        self.skill_keywords = self._build_skill_list()
+    
+    def _build_skill_list(self) -> List[str]:
+        skills = []
+        for category in SCORING_CONFIG.values():
+            skills.extend(category['keywords'])
+        return list(set(skills))
+    
+    def extract_all(self, text: str) -> CandidateProfile:
+        profile = CandidateProfile(raw_text=text)
+        
+        profile.full_name = self._extract_name(text)
+        profile.email = self._extract_email(text)
+        profile.contact_number = self._extract_phone(text)
+        profile.address = self._extract_address(text)
+        profile.linkedin_url = self._extract_linkedin(text)
+        profile.github_url = self._extract_github(text)
+        profile.other_links = self._extract_other_urls(text)
+        profile.skills = self._extract_skills(text)
+        profile.work_experience = self._extract_work_experience(text)
+        profile.recent_company = self._get_recent_company(profile.work_experience)
+        profile.total_experience_years = self._calculate_experience(profile.work_experience)
+        profile.education = self._extract_education(text)
+        profile.industry = self._infer_industry(text)
+        
+        return profile
+    
+    def _extract_name(self, text: str) -> str:
+        lines = [l.strip() for l in text.strip().split('\n') if l.strip()]
+        
+        if nlp and lines:
+            doc = nlp(lines[0])
+            for ent in doc.ents:
+                if ent.label_ == "PERSON":
+                    return ent.text
+        
+        for line in lines[:5]:
+            if (len(line.split()) <= 4 and 
+                not any(c.isdigit() for c in line) and
+                not any(w in line.lower() for w in ['resume', 'cv', 'curriculum'])):
+                return line
+        
+        return ""
+    
+    def _extract_email(self, text: str) -> str:
+        match = self.EMAIL_RE.search(text)
+        return match.group(0) if match else ""
+    
+    def _extract_phone(self, text: str) -> str:
+        phones = self.PHONE_RE.findall(text)
+        return max(phones, key=len).strip() if phones else ""
+    
+    def _extract_address(self, text: str) -> str:
+        pattern = r'[A-Za-z\s]+,\s*[A-Z]{2}\s*\d{5}'
+        match = re.search(pattern, text)
+        return match.group(0) if match else ""
+    
+    def _extract_linkedin(self, text: str) -> str:
+        match = self.LINKEDIN_RE.search(text)
+        return f"https://linkedin.com/in/{match.group(1)}" if match else ""
+    
+    def _extract_github(self, text: str) -> str:
+        match = self.GITHUB_RE.search(text)
+        return f"https://github.com/{match.group(1)}" if match else ""
+    
+    def _extract_other_urls(self, text: str) -> List[str]:
+        urls = self.URL_RE.findall(text)
+        return [u for u in urls if 'linkedin.com' not in u and 'github.com' not in u][:5]
+    
+    def _extract_skills(self, text: str) -> List[str]:
+        text_lower = text.lower()
+        skills_section = self._find_section(text, ['skills', 'technical skills', 'competencies'])
+        search_text = skills_section.lower() if skills_section else text_lower
+        
+        return list(set(skill for skill in self.skill_keywords if skill.lower() in search_text))
+    
+    def _extract_work_experience(self, text: str) -> List[Dict]:
+        exp_section = self._find_section(text, ['work experience', 'professional experience', 'employment', 'experience']) or text
+        
+        experiences = []
+        current = {}
+        date_pattern = r'\d{4}\s*[-–]\s*(?:\d{4}|present|current)'
+        
+        for line in exp_section.split('\n'):
+            if re.search(date_pattern, line, re.IGNORECASE):
+                if current:
+                    experiences.append(current)
+                current = {
+                    'raw': line,
+                    'duration': re.search(date_pattern, line, re.IGNORECASE).group(0)
+                }
+            elif current and line.strip():
+                current['description'] = current.get('description', '') + ' ' + line
+        
+        if current:
+            experiences.append(current)
+        
+        return experiences[:10]
+    
+    def _get_recent_company(self, work_experience: List[Dict]) -> str:
+        if work_experience:
+            raw = work_experience[0].get('raw', '')
+            parts = re.split(r'[\|\-–]', raw)
+            return parts[0].strip() if parts else ""
+        return ""
+    
+    def _calculate_experience(self, work_experience: List[Dict]) -> float:
+        total = 0.0
+        for exp in work_experience:
+            match = re.match(r'(\d{4})\s*[-–]\s*(\d{4}|present|current)', 
+                           exp.get('duration', ''), re.IGNORECASE)
+            if match:
+                start = int(match.group(1))
+                end = datetime.now().year if match.group(2).lower() in ['present', 'current'] else int(match.group(2))
+                total += max(0, end - start)
+        return total
+    
+    def _extract_education(self, text: str) -> List[Dict]:
+        edu_section = self._find_section(text, ['education', 'academic', 'qualification']) or text
+        
+        education = []
+        patterns = [
+            r'(B\.?S\.?|B\.?A\.?|M\.?S\.?|M\.?A\.?|Ph\.?D\.?|MBA|B\.?Tech|M\.?Tech)[^,\n]*',
+            r'(Bachelor|Master|Doctor|Associate)[^,\n]*',
+        ]
+        
+        for pattern in patterns:
+            for match in re.findall(pattern, edu_section, re.IGNORECASE):
+                education.append({'degree': match.strip()})
+        
+        return education[:5]
+    
+    def _infer_industry(self, text: str) -> str:
+        industries = {
+            'Technology': ['software', 'tech', 'developer', 'engineer', 'programming'],
+            'Finance': ['finance', 'banking', 'investment', 'trading', 'fintech'],
+            'Healthcare': ['healthcare', 'medical', 'pharma', 'biotech'],
+            'Education': ['education', 'teaching', 'academic', 'research'],
+            'Consulting': ['consulting', 'advisory', 'strategy'],
+        }
+        
+        text_lower = text.lower()
+        scores = {ind: sum(1 for kw in keywords if kw in text_lower) 
+                 for ind, keywords in industries.items()}
+        
+        return max(scores, key=scores.get) if any(scores.values()) else "Other"
+    
+    def _find_section(self, text: str, headers: List[str]) -> Optional[str]:
+        lines = text.split('\n')
+        section = []
+        capturing = False
+        
+        for line in lines:
+            line_lower = line.lower().strip()
+            
+            if any(h in line_lower for h in headers):
+                capturing = True
+                continue
+            
+            if capturing:
+                if line_lower and any(kw in line_lower for kw in 
+                    ['experience', 'education', 'skills', 'project', 'certification']):
+                    if not any(h in line_lower for h in headers):
+                        break
+                section.append(line)
+        
+        return '\n'.join(section) if section else None
+
+
+class ScoringEngine:
+    @staticmethod
+    def calculate_score(profile: CandidateProfile) -> None:
+        ai_score = 0
+        coding_score = 0
+        
+        full_text = ' '.join([
+            profile.raw_text,
+            ' '.join(profile.skills),
+            profile.recent_company,
+            profile.industry
+        ]).lower()
+        
+        for category, config in SCORING_CONFIG.items():
+            category_score = 0
+            for keyword in config['keywords']:
+                occurrences = min(full_text.count(keyword.lower()), 3)
+                category_score += occurrences * config['weight']
+            
+            if category in ['ai_ml_core', 'ai_frameworks', 'cloud_ml']:
+                ai_score += category_score
+            elif category in ['programming', 'general_dev']:
+                coding_score += category_score
+            else:
+                ai_score += category_score * 0.7
+                coding_score += category_score * 0.3
+        
+        exp_multiplier = ScoringEngine._get_exp_multiplier(profile.total_experience_years)
+        
+        bonus = 0
+        if profile.github_url:
+            bonus += 20
+        if profile.linkedin_url:
+            bonus += 10
+        bonus += 5 * len(profile.other_links)
+        
+        profile.ai_score = round(ai_score, 2)
+        profile.coding_score = round(coding_score, 2)
+        profile.experience_score = round(exp_multiplier * 100, 2)
+        profile.final_score = round((ai_score + coding_score + bonus) * exp_multiplier, 2)
+    
+    @staticmethod
+    def _get_exp_multiplier(years: float) -> float:
+        for (min_y, max_y), multiplier in EXPERIENCE_MULTIPLIERS.items():
+            if min_y <= years < max_y:
+                return multiplier
+        return 1.0
+
+
+class CVParser:
+    def __init__(self, output_dir: str = "results"):
+        self.output_dir = output_dir
+        self.extractor = InformationExtractor()
+        self.profiles: List[CandidateProfile] = []
+        os.makedirs(output_dir, exist_ok=True)
+    
+    def process_cv(self, pdf_path: str) -> CandidateProfile:
+        logger.info(f"Processing: {pdf_path}")
+        
+        try:
+            text = PDFExtractor.extract_text(pdf_path)
+            
+            if len(text.strip()) < 50:
+                logger.warning(f"Insufficient text from {pdf_path}")
+                return CandidateProfile(full_name=f"Failed: {os.path.basename(pdf_path)}")
+            
+            profile = self.extractor.extract_all(text)
+            ScoringEngine.calculate_score(profile)
+            self.profiles.append(profile)
+            
+            logger.info(f"Processed: {profile.full_name} (Score: {profile.final_score})")
+            return profile
+            
+        except Exception as e:
+            logger.error(f"Error processing {pdf_path}: {e}")
+            return CandidateProfile(full_name=f"Error: {os.path.basename(pdf_path)}")
+    
+    def process_folder(self, folder_path: str) -> List[CandidateProfile]:
+        pdf_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) 
+                    if f.lower().endswith('.pdf')]
+        
+        logger.info(f"Found {len(pdf_files)} PDFs")
+        
+        for pdf in pdf_files:
+            self.process_cv(pdf)
+        
+        self._rank_profiles()
+        return self.profiles
+    
+    def _rank_profiles(self):
+        self.profiles.sort(key=lambda x: x.final_score, reverse=True)
+        total = len(self.profiles)
+        
+        for idx, profile in enumerate(self.profiles, 1):
+            profile.rank = idx
+            pct = idx / total
+            
+            if pct <= 0.1:
+                profile.tier = "Top 10%"
+            elif pct <= 0.25:
+                profile.tier = "Top 25%"
+            elif pct <= 0.5:
+                profile.tier = "Top 50%"
+            else:
+                profile.tier = "Lower 50%"
+    
+    def export_excel(self, filename: str = None) -> str:
+        if not filename:
+            filename = f"cv_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        
+        filepath = os.path.join(self.output_dir, filename)
+        
+        data = [{
+            'Rank': p.rank,
+            'Name': p.full_name,
+            'Email': p.email,
+            'Phone': p.contact_number,
+            'LinkedIn': p.linkedin_url,
+            'GitHub': p.github_url,
+            'Recent Company': p.recent_company,
+            'Years Experience': p.total_experience_years,
+            'Industry': p.industry,
+            'Skills': ', '.join(p.skills),
+            'AI Score': p.ai_score,
+            'Coding Score': p.coding_score,
+            'Final Score': p.final_score,
+            'Tier': p.tier
+        } for p in self.profiles]
+        
+        df = pd.DataFrame(data)
+        df.to_excel(filepath, sheet_name='Analysis', index=False)
+        
+        logger.info(f"Exported to: {filepath}")
+        return filepath
+    
+    def export_json(self, filename: str = None) -> str:
+        if not filename:
+            filename = f"cv_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        
+        filepath = os.path.join(self.output_dir, filename)
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump([asdict(p) for p in self.profiles], f, indent=2)
+        
+        logger.info(f"Exported to: {filepath}")
+        return filepath
+    
+    def get_top(self, n: int = 10) -> List[CandidateProfile]:
+        return self.profiles[:n]
+
+
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Parse and score CV/Resume PDFs')
+    parser.add_argument('path', help='Path to PDF file or folder containing PDFs')
+    parser.add_argument('-o', '--output', default='cv_results', help='Output directory (default: cv_results)')
+    parser.add_argument('--json', action='store_true', help='Export to JSON instead of Excel')
+    
+    args = parser.parse_args()
+    
+    cv_parser = CVParser(output_dir=args.output)
+    
+    if os.path.isdir(args.path):
+        cv_parser.process_folder(args.path)
+        if args.json:
+            cv_parser.export_json()
+        else:
+            cv_parser.export_excel()
+        print(f"Processed {len(cv_parser.profiles)} CVs")
+    elif os.path.isfile(args.path):
+        profile = cv_parser.process_cv(args.path)
+        print(f"{profile.full_name}: {profile.final_score}")
+    else:
+        print(f"Error: {args.path} is not a valid file or directory")
