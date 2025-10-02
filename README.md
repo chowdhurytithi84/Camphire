@@ -51,24 +51,18 @@ top_10 = parser.get_top(10)
 
 ## Scoring System
 
-**Keyword Categories:**
-- **AI/ML Core** (Weight: 10) - machine learning, deep learning, NLP, computer vision
-- **AI Frameworks** (Weight: 8) - TensorFlow, PyTorch, Keras, Hugging Face
-- **Cloud ML** (Weight: 7) - AWS SageMaker, Azure ML, GCP Vertex AI
-- **Data Science** (Weight: 6) - pandas, numpy, MLOps, data analysis
-- **Programming** (Weight: 5) - Python, R, C++, Java, SQL
-- **General Dev** (Weight: 3) - Git, CI/CD, REST API, microservices
+| Category | Weight | Examples |
+|----------|--------|----------|
+| AI/ML Core | 10 | machine learning, deep learning, NLP |
+| AI Frameworks | 8 | TensorFlow, PyTorch, Keras |
+| Cloud ML | 7 | AWS SageMaker, Azure ML, GCP |
+| Data Science | 6 | pandas, numpy, MLOps |
+| Programming | 5 | Python, R, C++, Java |
+| General Dev | 3 | Git, CI/CD, REST API |
 
-**Experience Multipliers:**
-- 0-2 years: 1.0x
-- 2-5 years: 1.3x
-- 5-10 years: 1.6x
-- 10+ years: 2.0x
+**Experience Multipliers:** 0-2 years (1.0x) | 2-5 years (1.3x) | 5-10 years (1.6x) | 10+ years (2.0x)
 
-**Bonus Points:**
-- GitHub profile: +20
-- LinkedIn profile: +10
-- Portfolio links: +5 each
+**Bonus Points:** GitHub (+20) | LinkedIn (+10) | Portfolio (+5 each)
 
 ## Output
 
