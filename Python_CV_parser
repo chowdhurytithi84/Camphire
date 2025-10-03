@@ -9,13 +9,6 @@ import pandas as pd
 import pdfplumber
 
 try:
-    import pytesseract
-    from pdf2image import convert_from_path
-    OCR_AVAILABLE = True
-except ImportError:
-    OCR_AVAILABLE = False
-
-try:
     import spacy
     nlp = spacy.load("en_core_web_sm")
 except (ImportError, OSError):
