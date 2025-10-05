@@ -124,25 +124,6 @@ class PDFExtractor:
                     page_text = page.extract_text()
                     if page_text:
                         text += page_text + "\n"
-            
-            if len(text.strip()) < 100 and OCR_AVAILABLE:
-                logger.info(f"Low text content, attempting OCR for {pdf_path}")
-                text = PDFExtractor._ocr_extract(pdf_path)
-        except Exception as e:
-            logger.error(f"Error extracting text from {pdf_path}: {e}")
-            if OCR_AVAILABLE:
-                try:
-                    text = PDFExtractor._ocr_extract(pdf_path)
-                except Exception as ocr_err:
-                    logger.error(f"OCR failed: {ocr_err}")
-        
-        return text
-    
-    @staticmethod
-    def _ocr_extract(pdf_path: str) -> str:
-        images = convert_from_path(pdf_path)
-        return "\n".join(pytesseract.image_to_string(img) for img in images)
-
 
 class InformationExtractor:
     EMAIL_RE = re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b')
@@ -203,12 +184,7 @@ class InformationExtractor:
     def _extract_phone(self, text: str) -> str:
         phones = self.PHONE_RE.findall(text)
         return max(phones, key=len).strip() if phones else ""
-    
-    def _extract_address(self, text: str) -> str:
-        pattern = r'[A-Za-z\s]+,\s*[A-Z]{2}\s*\d{5}'
-        match = re.search(pattern, text)
-        return match.group(0) if match else ""
-    
+
     def _extract_linkedin(self, text: str) -> str:
         match = self.LINKEDIN_RE.search(text)
         return f"https://linkedin.com/in/{match.group(1)}" if match else ""
@@ -284,21 +260,6 @@ class InformationExtractor:
         
         return education[:5]
     
-    def _infer_industry(self, text: str) -> str:
-        industries = {
-            'Technology': ['software', 'tech', 'developer', 'engineer', 'programming'],
-            'Finance': ['finance', 'banking', 'investment', 'trading', 'fintech'],
-            'Healthcare': ['healthcare', 'medical', 'pharma', 'biotech'],
-            'Education': ['education', 'teaching', 'academic', 'research'],
-            'Consulting': ['consulting', 'advisory', 'strategy'],
-        }
-        
-        text_lower = text.lower()
-        scores = {ind: sum(1 for kw in keywords if kw in text_lower) 
-                 for ind, keywords in industries.items()}
-        
-        return max(scores, key=scores.get) if any(scores.values()) else "Other"
-    
     def _find_section(self, text: str, headers: List[str]) -> Optional[str]:
         lines = text.split('\n')
         section = []
@@ -331,8 +292,7 @@ class ScoringEngine:
             profile.raw_text,
             ' '.join(profile.skills),
             profile.recent_company,
-            profile.industry
-        ]).lower()
+             ]).lower()
         
         for category, config in SCORING_CONFIG.items():
             category_score = 0
