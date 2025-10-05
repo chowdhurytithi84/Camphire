@@ -125,6 +125,10 @@ class PDFExtractor:
                     if page_text:
                         text += page_text + "\n"
 
+  except Exception as e:
+            logger.error(f"Error extracting PDF: {e}")
+        return text
+
 class InformationExtractor:
     EMAIL_RE = re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b')
     PHONE_RE = re.compile(r'[\+]?[(]?[0-9]{1,4}[)]?[-\s\.]?[(]?[0-9]{1,4}[)]?[-\s\.]?[0-9]{1,5}[-\s\.]?[0-9]{1,5}')
@@ -147,7 +151,7 @@ class InformationExtractor:
         profile.full_name = self._extract_name(text)
         profile.email = self._extract_email(text)
         profile.contact_number = self._extract_phone(text)
-        profile.address = self._extract_address(text)
+        profile.address = ""  # Not extracted
         profile.linkedin_url = self._extract_linkedin(text)
         profile.github_url = self._extract_github(text)
         profile.other_links = self._extract_other_urls(text)
@@ -156,7 +160,7 @@ class InformationExtractor:
         profile.recent_company = self._get_recent_company(profile.work_experience)
         profile.total_experience_years = self._calculate_experience(profile.work_experience)
         profile.education = self._extract_education(text)
-        profile.industry = self._infer_industry(text)
+        profile.industry = ""  # Not extracted
         
         return profile
     
